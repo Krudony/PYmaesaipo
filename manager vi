@@ -1,0 +1,825 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Google Drive Document Manager with OAuth (Fixed Version)
+ระบบจัดการเอกสาร Google Drive ด้วย OAuth Client Secret config
+"""
+
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import os
+from datetime import datetime
+import threading
+import webbrowser
+import shutil
+import json
+import pickle
+
+# ทดลอง import libraries
+try:
+    import qrcode
+    QR_AVAILABLE = True
+except ImportError:
+    QR_AVAILABLE = False
+
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
+# Import libraries at module level
+import sys
+import subprocess
+
+def install_and_import(package):
+    try:
+        __import__(package)
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+        __import__(package)
+
+# Ensure all packages are installed
+required_packages = [
+    'google-auth-oauthlib',
+    'google-api-python-client', 
+    'google-auth-httplib2',
+    'google-auth'
+]
+
+for package in required_packages:
+    try:
+        if package == 'google-auth-oauthlib':
+            from google_auth_oauthlib.flow import InstalledAppFlow
+        elif package == 'google-api-python-client':
+            from googleapiclient.discovery import build
+            from googleapiclient.http import MediaFileUpload
+        elif package == 'google-auth':
+            from google.auth.transport.requests import Request
+    except ImportError as e:
+        print(f"⚠️ Installing {package}...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+# Import again after installation
+try:
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
+    GOOGLE_API_AVAILABLE = True
+    print("✅ Google API Libraries โหลดสำเร็จ")
+except ImportError as e:
+    print(f"❌ Google API Import Error: {e}")
+    GOOGLE_API_AVAILABLE = False
+
+class DriveManagerOAuth:
+    def __init__(self):
+        """Initialize the Drive Manager with OAuth"""
+        self.SCOPES = [
+            'https://www.googleapis.com/auth/drive.file',
+            'https://www.googleapis.com/auth/spreadsheets'
+        ]
+        self.DRIVE_FOLDER_ID = "1fC2V5qvSvcQasZXRhSTUQ4rxEbc0n5IX"
+        self.SHEET_ID = "10UCFCd7lyuuoonphwrnyACryKojIvAICGpMbdCy3-Zs"
+        
+        self.drive_service = None
+        self.sheets_service = None
+        self.uploaded_files = []
+        self.credentials_valid = False
+        
+        # Initialize GUI
+        self.setup_gui()
+        
+        # Check credentials
+        self.check_credentials()
+    
+    def check_credentials(self):
+        """Check if credentials exist"""
+        if not GOOGLE_API_AVAILABLE:
+            self.status_label.config(text="❌ Google API ไม่พร้อมใช้งาน", fg="red")
+            return
+            
+        if os.path.exists('client_secrets.json'):
+            self.credentials_path_var.set('client_secrets.json')
+            self.status_label.config(text="✅ พบ Client Secrets - กดทดสอบการเชื่อมต่อ", fg="green")
+        else:
+            self.status_label.config(text="⚠️ ไม่พบ client_secrets.json - กรุณาอัพโหลด", fg="orange")
+    
+    def setup_gui(self):
+        """Setup the main GUI"""
+        self.root = tk.Tk()
+        self.root.title("📁 Google Drive Manager (OAuth)")
+        self.root.geometry("900x700")
+        self.root.configure(bg="#f5f5f5")
+        
+        # Create main container
+        main_container = tk.Frame(self.root, bg="#f5f5f5")
+        main_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Title
+        title_label = tk.Label(
+            main_container,
+            text="📁 ระบบจัดการเอกสาร Google Drive (OAuth)",
+            font=("Arial", 16, "bold"),
+            bg="#f5f5f5",
+            fg="#2c3e50"
+        )
+        title_label.pack(pady=(0, 20))
+        
+        # Tab buttons
+        tab_frame = tk.Frame(main_container, bg="#f5f5f5")
+        tab_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        self.setup_tab_btn = tk.Button(
+            tab_frame,
+            text="🔧 ตั้งค่า OAuth",
+            command=self.show_setup_tab,
+            bg="#3498db",
+            fg="white",
+            font=("Arial", 10, "bold"),
+            padx=20
+        )
+        self.setup_tab_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.upload_tab_btn = tk.Button(
+            tab_frame,
+            text="📤 อัพโหลด",
+            command=self.show_upload_tab,
+            bg="#95a5a6",
+            fg="white",
+            font=("Arial", 10, "bold"),
+            padx=20
+        )
+        self.upload_tab_btn.pack(side=tk.LEFT)
+        
+        # Content frame
+        self.content_frame = tk.Frame(main_container, bg="#f5f5f5")
+        self.content_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Create tab contents
+        self.create_setup_content()
+        self.create_upload_content()
+        
+        # Show setup tab initially
+        self.show_setup_tab()
+        
+        # Status bar
+        self.status_label = tk.Label(
+            self.root,
+            text="⏳ กำลังตรวจสอบระบบ...",
+            font=("Arial", 10),
+            bg="#f5f5f5",
+            fg="#7f8c8d",
+            pady=5
+        )
+        self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
+    
+    def create_setup_content(self):
+        """Create setup tab content"""
+        self.setup_content = tk.Frame(self.content_frame, bg="#f5f5f5")
+        
+        # Instructions section
+        inst_frame = tk.LabelFrame(
+            self.setup_content,
+            text="📋 วิธีการแก้ปัญหา OAuth",
+            font=("Arial", 12, "bold"),
+            bg="#f5f5f5",
+            padx=20,
+            pady=20
+        )
+        inst_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        instructions = """
+🔧 วิธีแก้ปัญหา "This app is blocked":
+
+1. ไปที่ https://console.cloud.google.com/
+2. เลือก "APIs & Services" > "OAuth consent screen"
+3. ในส่วน "Test users" คลิก "+ ADD USERS"
+4. ใส่ email ของคุณ (email ที่ใช้กับ Google Account)
+5. คลิก "SAVE"
+
+หรือ เมื่อเจอหน้า "This app isn't verified":
+- คลิก "Advanced" ที่มุมซ้ายล่าง
+- คลิก "Go to [App Name] (unsafe)"
+- คลิก "Continue" หรือ "Allow"
+        """
+        
+        inst_label = tk.Label(
+            inst_frame,
+            text=instructions.strip(),
+            bg="#f5f5f5",
+            fg="#34495e",
+            font=("Arial", 10),
+            justify=tk.LEFT
+        )
+        inst_label.pack(anchor=tk.W)
+        
+        # OAuth credentials file section
+        cred_frame = tk.LabelFrame(
+            self.setup_content,
+            text="🔑 OAuth Credentials File",
+            font=("Arial", 12, "bold"),
+            bg="#f5f5f5",
+            padx=20,
+            pady=20
+        )
+        cred_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        # File selection
+        file_frame = tk.Frame(cred_frame, bg="#f5f5f5")
+        file_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        tk.Label(file_frame, text="📄 OAuth Client Secret JSON:", bg="#f5f5f5", font=("Arial", 10, "bold")).pack(anchor=tk.W)
+        
+        select_frame = tk.Frame(file_frame, bg="#f5f5f5")
+        select_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        self.credentials_path_var = tk.StringVar()
+        self.cred_entry = tk.Entry(
+            select_frame,
+            textvariable=self.credentials_path_var,
+            font=("Arial", 10),
+            width=50
+        )
+        self.cred_entry.pack(side=tk.LEFT, padx=(0, 10))
+        
+        browse_cred_btn = tk.Button(
+            select_frame,
+            text="🔍 เลือกไฟล์",
+            command=self.browse_credentials,
+            bg="#2ecc71",
+            fg="white",
+            font=("Arial", 9)
+        )
+        browse_cred_btn.pack(side=tk.LEFT)
+        
+        # Test connection button
+        self.test_cred_btn = tk.Button(
+            cred_frame,
+            text="✅ ทดสอบการเชื่อมต่อ",
+            command=self.test_credentials,
+            bg="#e74c3c",
+            fg="white",
+            font=("Arial", 10, "bold"),
+            pady=10
+        )
+        self.test_cred_btn.pack(pady=(10, 0))
+        
+        # Connection status
+        self.connection_status = tk.Label(
+            cred_frame,
+            text="",
+            bg="#f5f5f5",
+            font=("Arial", 10, "bold")
+        )
+        self.connection_status.pack(pady=(10, 0))
+        
+        # Token management
+        token_frame = tk.LabelFrame(
+            self.setup_content,
+            text="🔄 การจัดการ Token",
+            font=("Arial", 12, "bold"),
+            bg="#f5f5f5",
+            padx=20,
+            pady=20
+        )
+        token_frame.pack(fill=tk.X)
+        
+        token_text = """
+💡 หากมีปัญหาการเชื่อมต่อ:
+- ลบไฟล์ token.json และทดสอบใหม่
+- ตรวจสอบว่าได้เพิ่ม Test Users แล้ว
+- ตรวจสอบว่า APIs เปิดใช้งานแล้ว (Drive API, Sheets API)
+        """
+        
+        token_label = tk.Label(
+            token_frame,
+            text=token_text.strip(),
+            bg="#f5f5f5",
+            fg="#34495e",
+            font=("Arial", 10),
+            justify=tk.LEFT
+        )
+        token_label.pack(anchor=tk.W)
+        
+        # Clear token button
+        clear_token_btn = tk.Button(
+            token_frame,
+            text="🗑️ ลบ Token (แก้ปัญหาการเชื่อมต่อ)",
+            command=self.clear_token,
+            bg="#f39c12",
+            fg="white",
+            font=("Arial", 9)
+        )
+        clear_token_btn.pack(pady=(10, 0))
+    
+    def create_upload_content(self):
+        """Create upload tab content"""
+        self.upload_content = tk.Frame(self.content_frame, bg="#f5f5f5")
+        
+        # Upload section
+        upload_frame = tk.LabelFrame(
+            self.upload_content,
+            text="📤 อัพโหลดเอกสาร",
+            font=("Arial", 12, "bold"),
+            bg="#f5f5f5",
+            padx=20,
+            pady=20
+        )
+        upload_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        # Folder name
+        folder_frame = tk.Frame(upload_frame, bg="#f5f5f5")
+        folder_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        tk.Label(folder_frame, text="📁 ชื่อโฟลเดอร์:", bg="#f5f5f5", font=("Arial", 10, "bold")).pack(anchor=tk.W)
+        
+        folder_input_frame = tk.Frame(folder_frame, bg="#f5f5f5")
+        folder_input_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        self.folder_entry = tk.Entry(folder_input_frame, width=30, font=("Arial", 10))
+        self.folder_entry.pack(side=tk.LEFT, padx=(0, 10))
+        
+        check_btn = tk.Button(
+            folder_input_frame,
+            text="✓ ตรวจสอบ",
+            command=self.check_folder_name,
+            bg="#3498db",
+            fg="white",
+            font=("Arial", 9)
+        )
+        check_btn.pack(side=tk.LEFT)
+        
+        self.folder_status = tk.Label(folder_input_frame, text="", bg="#f5f5f5")
+        self.folder_status.pack(side=tk.LEFT, padx=(10, 0))
+        
+        # File selection
+        file_frame = tk.Frame(upload_frame, bg="#f5f5f5")
+        file_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        tk.Label(file_frame, text="📄 เลือกไฟล์:", bg="#f5f5f5", font=("Arial", 10, "bold")).pack(anchor=tk.W)
+        
+        file_input_frame = tk.Frame(file_frame, bg="#f5f5f5")
+        file_input_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        self.file_path_var = tk.StringVar()
+        self.file_entry = tk.Entry(
+            file_input_frame,
+            textvariable=self.file_path_var,
+            width=50,
+            font=("Arial", 10)
+        )
+        self.file_entry.pack(side=tk.LEFT, padx=(0, 10))
+        
+        browse_btn = tk.Button(
+            file_input_frame,
+            text="🔍 เลือก",
+            command=self.browse_file,
+            bg="#2ecc71",
+            fg="white",
+            font=("Arial", 9)
+        )
+        browse_btn.pack(side=tk.LEFT)
+        
+        # Upload button
+        self.upload_btn = tk.Button(
+            upload_frame,
+            text="🚀 อัพโหลดเอกสาร",
+            command=self.upload_file,
+            bg="#e74c3c",
+            fg="white",
+            font=("Arial", 12, "bold"),
+            pady=10,
+            state=tk.DISABLED
+        )
+        self.upload_btn.pack(pady=(15, 0))
+        
+        # Files list
+        files_frame = tk.LabelFrame(
+            self.upload_content,
+            text="📋 เอกสารที่อัพโหลด",
+            font=("Arial", 12, "bold"),
+            bg="#f5f5f5",
+            padx=20,
+            pady=20
+        )
+        files_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Create listbox with scrollbar
+        list_frame = tk.Frame(files_frame, bg="#f5f5f5")
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.files_listbox = tk.Listbox(
+            list_frame,
+            yscrollcommand=scrollbar.set,
+            font=("Arial", 10),
+            height=8
+        )
+        self.files_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.files_listbox.yview)
+        
+        # Bind double-click
+        self.files_listbox.bind("<Double-Button-1>", self.on_file_double_click)
+        
+        # Buttons
+        btn_frame = tk.Frame(files_frame, bg="#f5f5f5")
+        btn_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        refresh_btn = tk.Button(
+            btn_frame,
+            text="🔄 รีเฟรช",
+            command=self.refresh_files,
+            bg="#95a5a6",
+            fg="white",
+            font=("Arial", 9)
+        )
+        refresh_btn.pack(side=tk.LEFT)
+        
+        if QR_AVAILABLE:
+            qr_btn = tk.Button(
+                btn_frame,
+                text="📱 QR Code",
+                command=self.show_qr_for_selected,
+                bg="#9b59b6",
+                fg="white",
+                font=("Arial", 9)
+            )
+            qr_btn.pack(side=tk.LEFT, padx=(10, 0))
+    
+    def show_setup_tab(self):
+        """Show setup tab"""
+        for widget in self.content_frame.winfo_children():
+            widget.pack_forget()
+        
+        self.setup_content.pack(fill=tk.BOTH, expand=True)
+        self.setup_tab_btn.config(bg="#3498db")
+        self.upload_tab_btn.config(bg="#95a5a6")
+    
+    def show_upload_tab(self):
+        """Show upload tab"""
+        if not self.credentials_valid:
+            messagebox.showwarning("เตือน", "กรุณาตั้งค่า OAuth ก่อนใช้งาน")
+            return
+        
+        for widget in self.content_frame.winfo_children():
+            widget.pack_forget()
+        
+        self.upload_content.pack(fill=tk.BOTH, expand=True)
+        self.setup_tab_btn.config(bg="#95a5a6")
+        self.upload_tab_btn.config(bg="#3498db")
+    
+    def browse_credentials(self):
+        """Browse for credentials file"""
+        file_path = filedialog.askopenfilename(
+            title="เลือกไฟล์ OAuth Client Secret JSON",
+            filetypes=[
+                ("JSON files", "*.json"),
+                ("All files", "*.*")
+            ]
+        )
+        
+        if file_path:
+            try:
+                # Validate OAuth credentials file
+                with open(file_path, 'r') as f:
+                    cred_data = json.load(f)
+                
+                # Check if it's OAuth client secret
+                if 'installed' in cred_data or 'web' in cred_data:
+                    # Copy and rename file
+                    shutil.copy2(file_path, 'credentials.json')
+                    self.credentials_path_var.set('credentials.json')
+                    messagebox.showinfo("สำเร็จ", "คัดลอกไฟล์ OAuth Credentials เรียบร้อยแล้ว\nกรุณากดทดสอบการเชื่อมต่อ")
+                else:
+                    messagebox.showerror("ข้อผิดพลาด", "ไฟล์นี้ไม่ใช่ OAuth Client Secret JSON\nกรุณาดาวน์โหลดไฟล์ที่ถูกต้องจาก Google Cloud Console")
+                
+            except Exception as e:
+                messagebox.showerror("ข้อผิดพลาด", f"ไม่สามารถอ่านไฟล์ได้: {str(e)}")
+    
+    def clear_token(self):
+        """Clear existing token"""
+        try:
+            if os.path.exists('token.json'):
+                os.remove('token.json')
+                messagebox.showinfo("สำเร็จ", "ลบ Token แล้ว\nกรุณาทดสอบการเชื่อมต่อใหม่")
+            else:
+                messagebox.showinfo("แจ้งเตือน", "ไม่พบไฟล์ Token")
+        except Exception as e:
+            messagebox.showerror("ข้อผิดพลาด", f"ไม่สามารถลบ Token ได้: {str(e)}")
+    
+    def test_credentials(self):
+        """Test OAuth credentials"""
+        if not GOOGLE_API_AVAILABLE:
+            self.connection_status.config(text="❌ Google API ไม่พร้อมใช้งาน", fg="red")
+            return
+        
+        cred_file = self.credentials_path_var.get()
+        if not cred_file or not os.path.exists(cred_file):
+            self.connection_status.config(text="❌ ไม่พบไฟล์ Credentials", fg="red")
+            return
+        
+        # Test in thread
+        test_thread = threading.Thread(target=self._test_credentials_thread)
+        test_thread.daemon = True
+        test_thread.start()
+        
+        self.connection_status.config(text="🔄 กำลังทดสอบ...", fg="blue")
+        self.test_cred_btn.config(state=tk.DISABLED)
+    
+    def _test_credentials_thread(self):
+        """Test credentials in background thread"""
+        try:
+            # Import here to ensure it's available
+            from google_auth_oauthlib.flow import InstalledAppFlow
+            from google.auth.transport.requests import Request
+            from googleapiclient.discovery import build
+            from googleapiclient.http import MediaFileUpload
+            
+            creds = None
+            
+            # Load existing token
+            if os.path.exists('token.json'):
+                with open('token.json', 'rb') as token:
+                    creds = pickle.load(token)
+            
+            # If no valid credentials, get new ones
+            if not creds or not creds.valid:
+                if creds and creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                else:
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        'client_secrets.json', self.SCOPES)
+                    
+                    # ใช้ local server บน port 8080 (ต้องตั้งค่า redirect URI ใน Google Cloud Console)
+                    print("🔑 กำลังเริ่ม OAuth flow...")
+                    print("🌐 กำลังเปิดเบราว์เซอร์...")
+                    print("⚠️  ต้องเพิ่ม 'http://localhost:8080' ใน Authorized redirect URIs ใน Google Cloud Console")
+                    creds = flow.run_local_server(port=8080, open_browser=True)
+                    print("✅ OAuth สำเร็จ!")
+                
+                # Save credentials
+                with open('token.json', 'wb') as token:
+                    pickle.dump(creds, token)
+            
+            # Test services
+            drive_service = build('drive', 'v3', credentials=creds)
+            sheets_service = build('sheets', 'v4', credentials=creds)
+            
+            # Test API call
+            drive_service.files().list(pageSize=1).execute()
+            
+            # Success
+            self.drive_service = drive_service
+            self.sheets_service = sheets_service
+            self.credentials_valid = True
+            
+            self.root.after(0, self._test_success)
+            
+        except Exception as e:
+            error_msg = str(e)
+            self.root.after(0, lambda: self._test_error(error_msg))
+    
+    def _test_success(self):
+        """Handle successful test"""
+        self.connection_status.config(text="✅ เชื่อมต่อสำเร็จ!", fg="green")
+        self.test_cred_btn.config(state=tk.NORMAL, text="✅ เชื่อมต่อแล้ว", bg="#27ae60")
+        self.upload_btn.config(state=tk.NORMAL)
+        self.status_label.config(text="✅ พร้อมใช้งาน - สามารถอัพโหลดเอกสารได้", fg="green")
+        
+        messagebox.showinfo("สำเร็จ", "เชื่อมต่อ Google Drive สำเร็จ!\nสามารถใช้งานได้แล้ว")
+    
+    def _test_error(self, error_msg):
+        """Handle test error"""
+        self.connection_status.config(text="❌ เชื่อมต่อไม่สำเร็จ", fg="red")
+        self.test_cred_btn.config(state=tk.NORMAL)
+        
+        error_suggestions = ""
+        if "blocked" in error_msg.lower() or "unverified" in error_msg.lower():
+            error_suggestions = "\n\n💡 แนะนำ: เพิ่ม Test Users ใน OAuth Consent Screen หรือข้าม Warning ด้วยการคลิก Advanced"
+        
+        messagebox.showerror("ข้อผิดพลาด", f"ไม่สามารถเชื่อมต่อได้:\n{error_msg}{error_suggestions}")
+    
+    def check_folder_name(self):
+        """Check folder name validity"""
+        folder_name = self.folder_entry.get().strip()
+        
+        if not folder_name:
+            self.folder_status.config(text="❌ กรุณาใส่ชื่อโฟลเดอร์", fg="red")
+            return False
+        
+        invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+        if any(char in folder_name for char in invalid_chars):
+            self.folder_status.config(text="❌ ชื่อไม่ถูกต้อง", fg="red")
+            return False
+        
+        if len(folder_name) > 50:
+            self.folder_status.config(text="❌ ชื่อยาวเกินไป", fg="red")
+            return False
+        
+        self.folder_status.config(text="✅ ชื่อโฟลเดอร์ถูกต้อง", fg="green")
+        return True
+    
+    def browse_file(self):
+        """Browse for file"""
+        file_path = filedialog.askopenfilename(
+            title="เลือกไฟล์ที่ต้องการอัพโหลด",
+            filetypes=[
+                ("เอกสาร Word", "*.docx *.doc"),
+                ("เอกสาร PDF", "*.pdf"),
+                ("รูปภาพ", "*.jpg *.jpeg *.png *.gif"),
+                ("เอกสาร Excel", "*.xlsx *.xls"),
+                ("ไฟล์ทั้งหมด", "*.*")
+            ]
+        )
+        
+        if file_path:
+            self.file_path_var.set(file_path)
+    
+    def upload_file(self):
+        """Upload file to Google Drive"""
+        if not self.credentials_valid or not self.drive_service:
+            messagebox.showerror("ข้อผิดพลาด", "ยังไม่ได้เชื่อมต่อกับ Google Drive")
+            return
+        
+        if not self.check_folder_name():
+            return
+        
+        file_path = self.file_path_var.get()
+        if not file_path or not os.path.exists(file_path):
+            messagebox.showerror("ข้อผิดพลาด", "กรุณาเลือกไฟล์")
+            return
+        
+        # Start upload in thread  
+        upload_thread = threading.Thread(target=self._upload_thread, args=(file_path,))
+        upload_thread.daemon = True
+        upload_thread.start()
+    
+    def _upload_thread(self, file_path):
+        """Upload file in background thread"""
+        try:
+            self.root.after(0, lambda: self.status_label.config(text="📤 กำลังอัพโหลด...", fg="blue"))
+            self.root.after(0, lambda: self.upload_btn.config(state=tk.DISABLED))
+            
+            # Create folder structure
+            folder_name = self.folder_entry.get().strip()
+            upload_date = datetime.now().strftime("%Y%m%d")
+            sequence = len(self.uploaded_files) + 1
+            subfolder_name = f"{sequence:03d}_{upload_date}_{folder_name}"
+            
+            # Create subfolder
+            subfolder_id = self._create_folder(subfolder_name, self.DRIVE_FOLDER_ID)
+            if not subfolder_id:
+                raise Exception("ไม่สามารถสร้างโฟลเดอร์ได้")
+            
+            # Upload file
+            file_name = os.path.basename(file_path)
+            file_metadata = {
+                'name': file_name,
+                'parents': [subfolder_id]
+            }
+            
+            media = MediaFileUpload(file_path, resumable=True)
+            uploaded_file = self.drive_service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id,name,size,webViewLink'
+            ).execute()
+            
+            # Add to files list
+            file_info = {
+                'name': file_name,
+                'folder': subfolder_name,
+                'date': datetime.now().strftime("%Y-%m-%d %H:%M"),
+                'link': uploaded_file['webViewLink'],
+                'sequence': sequence
+            }
+            
+            self.uploaded_files.append(file_info)
+            
+            # Update GUI
+            self.root.after(0, self._upload_success, file_info)
+            
+        except Exception as e:
+            error_msg = f"Upload failed: {str(e)}"
+            self.root.after(0, lambda: messagebox.showerror("ข้อผิดพลาด", error_msg))
+            self.root.after(0, lambda: self.status_label.config(text="❌ อัพโหลดไม่สำเร็จ", fg="red"))
+            self.root.after(0, lambda: self.upload_btn.config(state=tk.NORMAL))
+    
+    def _create_folder(self, folder_name, parent_id):
+        """Create folder in Google Drive"""
+        try:
+            folder_metadata = {
+                'name': folder_name,
+                'mimeType': 'application/vnd.google-apps.folder',
+                'parents': [parent_id]
+            }
+            
+            folder = self.drive_service.files().create(
+                body=folder_metadata,
+                fields='id'
+            ).execute()
+            
+            return folder.get('id')
+        except Exception:
+            return None
+    
+    def _upload_success(self, file_info):
+        """Handle successful upload"""
+        self.status_label.config(text="✅ อัพโหลดสำเร็จ", fg="green")
+        self.upload_btn.config(state=tk.NORMAL)
+        self.refresh_files()
+        
+        # Clear form
+        self.folder_entry.delete(0, tk.END)
+        self.file_path_var.set("")
+        self.folder_status.config(text="")
+        
+        messagebox.showinfo("สำเร็จ", f"อัพโหลด '{file_info['name']}' สำเร็จ!")
+    
+    def refresh_files(self):
+        """Refresh files list"""
+        self.files_listbox.delete(0, tk.END)
+        
+        for i, file_info in enumerate(self.uploaded_files):
+            display_text = f"{i+1:2d}. {file_info['name']} | {file_info['folder']} | {file_info['date']}"
+            self.files_listbox.insert(tk.END, display_text)
+    
+    def on_file_double_click(self, event):
+        """Handle double-click on file"""
+        selection = self.files_listbox.curselection()
+        if not selection:
+            return
+        
+        file_info = self.uploaded_files[selection[0]]
+        webbrowser.open(file_info['link'])
+    
+    def show_qr_for_selected(self):
+        """Show QR code for selected file"""
+        if not QR_AVAILABLE:
+            messagebox.showwarning("คำเตือน", "QR Code ไม่พร้อมใช้งาน")
+            return
+        
+        selection = self.files_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("เตือน", "กรุณาเลือกไฟล์")
+            return
+        
+        file_info = self.uploaded_files[selection[0]]
+        self._show_qr_window(file_info)
+    
+    def _show_qr_window(self, file_info):
+        """Show QR code window"""
+        qr_window = tk.Toplevel(self.root)
+        qr_window.title(f"QR Code - {file_info['name']}")
+        qr_window.geometry("300x400")
+        qr_window.configure(bg="white")
+        
+        # File info
+        info_text = f"ไฟล์: {file_info['name']}\nโฟลเดอร์: {file_info['folder']}\nวันที่: {file_info['date']}"
+        tk.Label(qr_window, text=info_text, bg="white", justify=tk.LEFT).pack(pady=10)
+        
+        # Generate QR code
+        try:
+            qr = qrcode.QRCode(version=1, box_size=10, border=5)
+            qr.add_data(file_info['link'])
+            qr.make(fit=True)
+            
+            qr_img = qr.make_image(fill_color="black", back_color="white")
+            
+            if PIL_AVAILABLE:
+                qr_photo = ImageTk.PhotoImage(qr_img)
+                qr_label = tk.Label(qr_window, image=qr_photo, bg="white")
+                qr_label.image = qr_photo  # Keep reference
+                qr_label.pack(pady=10)
+            else:
+                tk.Label(qr_window, text="QR Code generated\n(PIL not available for display)", bg="white").pack(pady=10)
+            
+        except Exception as e:
+            tk.Label(qr_window, text=f"Error generating QR: {e}", bg="white").pack(pady=10)
+        
+        # Open button
+        tk.Button(
+            qr_window,
+            text="🌐 เปิดในเบราว์เซอร์",
+            command=lambda: webbrowser.open(file_info['link']),
+            bg="#3498db",
+            fg="white"
+        ).pack(pady=10)
+    
+    def run(self):
+        """Run the application"""
+        self.root.mainloop()
+
+def main():
+    """Main function"""
+    print("🚀 เริ่มต้น Google Drive Manager (OAuth)...")
+    
+    # Create and run application
+    app = DriveManagerOAuth()
+    app.run()
+
+if __name__ == "__main__":
+    main() 
